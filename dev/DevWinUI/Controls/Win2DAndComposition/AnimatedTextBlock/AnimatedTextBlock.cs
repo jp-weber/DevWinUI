@@ -24,6 +24,7 @@ public sealed partial class AnimatedTextBlock : Control
 
     private CanvasTextLayout _oldTextLayout;
     private CanvasTextLayout _newTextLayout;
+    private CanvasTextLayout _staticTextLayout;
 
     private ITextEffect _textEffect;
 
@@ -133,6 +134,7 @@ public sealed partial class AnimatedTextBlock : Control
         this.DefaultStyleKey = typeof(AnimatedTextBlock);
 
         this.Loaded += OnLoaded;
+        this.Unloaded += OnUnloaded;
         this.RegisterPropertyChangedCallback(AnimatedTextBlock.ForegroundProperty, ForegroundChangedCallback);
         this.RegisterPropertyChangedCallback(AnimatedTextBlock.FontFamilyProperty, FontFamilyChangedCallback);
         this.RegisterPropertyChangedCallback(AnimatedTextBlock.FontSizeProperty, FontSizeChangedCallback);
@@ -165,6 +167,30 @@ public sealed partial class AnimatedTextBlock : Control
         _newText = Text ?? string.Empty;
 
         SetRedrawState(AnimatedTextBlockRedrawState.TextChanged, false);
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        this.SizeChanged -= OnSizeChanged;
+
+        if (_animatedCanvas != null)
+        {
+            _animatedCanvas.Paused = true;
+            _animatedCanvas.CreateResources -= AnimatedCanvas_CreateResources;
+            _animatedCanvas.Update -= AnimatedCanvas_Update;
+            _animatedCanvas.Draw -= AnimatedCanvas_Draw;
+        }
+
+        _oldTextLayout?.Dispose();
+        _newTextLayout?.Dispose();
+        _staticTextLayout?.Dispose();
+        _textBrush?.Dispose();
+        _textFormat?.Dispose();
+
+        _oldTextLayout = null;
+        _newTextLayout = null;
+        _staticTextLayout = null;
+        _textBrush = null;
     }
 
     private void OnSizeChanged(object sender, SizeChangedEventArgs e)
@@ -225,7 +251,15 @@ public sealed partial class AnimatedTextBlock : Control
     {
         if (_textEffect == null)
         {
+            if (_currentState == AnimatedTextBlockRedrawState.TextChanged ||
+                _currentState == AnimatedTextBlockRedrawState.LayoutChanged)
+            {
+                ApplyTextFormat();
+                GenerateNewTextLayout(sender);
+            }
+
             SetRedrawState(AnimatedTextBlockRedrawState.Idle);
+            sender.Paused = true;
             return;
         }
 
@@ -240,7 +274,9 @@ public sealed partial class AnimatedTextBlock : Control
             else
             {
                 _oldText = _newText;
+                _oldTextLayout?.Dispose();
                 _oldTextLayout = _newTextLayout;
+                _newTextLayout = null;
 
                 GenerateNewTextLayout(sender);
 
@@ -272,6 +308,11 @@ public sealed partial class AnimatedTextBlock : Control
             UpdateAllClusterProgress(args.Timing);
         }
 
+        if (_currentState == AnimatedTextBlockRedrawState.Idle)
+        {
+            sender.Paused = true;
+        }
+
         _textEffect.Update(_oldText,
             _newText,
             _diffResults,
@@ -288,14 +329,17 @@ public sealed partial class AnimatedTextBlock : Control
 
         if (_textEffect == null)
         {
-            CanvasTextLayout ctl = new CanvasTextLayout(sender,
-                _newText,
-                _textFormat,
-                (float)sender.Size.Width,
-                (float)sender.Size.Height);
-            ctl.Options = CanvasDrawTextOptions.EnableColorFont;
+            if (_staticTextLayout == null)
+            {
+                _staticTextLayout = new CanvasTextLayout(sender,
+                    _newText,
+                    _textFormat,
+                    (float)sender.Size.Width,
+                    (float)sender.Size.Height);
+                _staticTextLayout.Options = CanvasDrawTextOptions.EnableColorFont;
+            }
 
-            args.DrawingSession.DrawTextLayout(ctl, 0, 0, _textColor);
+            args.DrawingSession.DrawTextLayout(_staticTextLayout, 0, 0, _textColor);
         }
         else
         {
@@ -342,15 +386,16 @@ public sealed partial class AnimatedTextBlock : Control
             {
                 var stops = new CanvasGradientStop[linearGradientBrush.GradientStops.Count];
 
-                foreach (var gradientStop in linearGradientBrush.GradientStops)
+                for (int i = 0; i < linearGradientBrush.GradientStops.Count; i++)
                 {
-                    var stop = new CanvasGradientStop()
+                    stops[i] = new CanvasGradientStop()
                     {
-                        Color = gradientStop.Color,
-                        Position = (float)gradientStop.Offset
+                        Color = linearGradientBrush.GradientStops[i].Color,
+                        Position = (float)linearGradientBrush.GradientStops[i].Offset
                     };
                 }
 
+                _textBrush?.Dispose();
                 _textBrush = new CanvasLinearGradientBrush(_animatedCanvas, stops);
             }
         }
@@ -366,6 +411,7 @@ public sealed partial class AnimatedTextBlock : Control
 
     private void GenerateOldTextLayout(ICanvasAnimatedControl resourceCreator)
     {
+        _oldTextLayout?.Dispose();
         _oldTextLayout = new CanvasTextLayout(resourceCreator, _oldText, _textFormat,
             (float)(resourceCreator.Size.Width),
             (float)(resourceCreator.Size.Height));
@@ -375,6 +421,9 @@ public sealed partial class AnimatedTextBlock : Control
 
     private void GenerateNewTextLayout(ICanvasAnimatedControl resourceCreator)
     {
+        _newTextLayout?.Dispose();
+        _staticTextLayout?.Dispose();
+        _staticTextLayout = null;
         _newTextLayout = new CanvasTextLayout(resourceCreator, _newText, _textFormat,
             (float)(resourceCreator.Size.Width),
             (float)(resourceCreator.Size.Height));
@@ -499,21 +548,14 @@ public sealed partial class AnimatedTextBlock : Control
         return false;
     }
 
-    private void ResetAllClusterProgress()
-    {
-        foreach (var diffResult in _diffResults)
-        {
-            var oldCluster = diffResult.OldGlyphCluster;
-            var newCluster = diffResult.NewGlyphCluster;
-
-            oldCluster.Progress = 0;
-            newCluster.Progress = 0;
-        }
-    }
-
     private void SetRedrawState(AnimatedTextBlockRedrawState state, bool fireEvent = true)
     {
         _currentState = state;
+
+        if (_animatedCanvas != null && state != AnimatedTextBlockRedrawState.Idle)
+        {
+            _animatedCanvas.Paused = false;
+        }
 
         if (fireEvent)
         {
